@@ -1,2 +1,4 @@
 #!/bin/sh
-./executor cfg/executor.cfg
+set -e
+cd "${0%/*}"
+exec ./executor cfg/executor.cfg

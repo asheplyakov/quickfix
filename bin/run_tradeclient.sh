@@ -1,2 +1,4 @@
 #!/bin/sh
-./tradeclient cfg/tradeclient.cfg
+set -e
+cd "${0%/*}"
+exec ./tradeclient cfg/tradeclient.cfg
