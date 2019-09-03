@@ -141,7 +141,7 @@ void SocketServer::close()
   {
     socket_handle s = i->first;
     socket_close( s );
-    socket_invalidate( s );
+    socket_invalidate( i->second.m_socket );
   }
 }
 
@@ -151,10 +151,12 @@ bool SocketServer::block( Strategy& strategy, bool poll, double timeout )
   SocketToInfo::iterator i = m_socketToInfo.begin();
   for( ; i != m_socketToInfo.end(); ++i )
   {
-    if( !socket_isValid(i->first) )
-      return false;
+    if( !socket_isValid(i->second.m_socket) )
+      continue;
     sockets.insert( i->first );
   }
+  if( sockets.empty() )
+    return false;
 
   ServerWrapper wrapper( sockets, *this, strategy );
   m_monitor.block( wrapper, poll, timeout );
