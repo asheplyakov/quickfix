@@ -22,6 +22,10 @@
 #else
 #include "config.h"
 #endif
+#ifndef _WIN32
+#include <poll.h>
+#define USE_POLL
+#endif
 
 #include "SocketConnection.h"
 #include "SocketAcceptor.h"
@@ -69,6 +73,36 @@ bool SocketConnection::send( const std::string& msg )
   return true;
 }
 
+int SocketConnection::select(timeval* timeout, bool write) {
+#ifdef USE_POLL
+    pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = m_socket;
+    pfd.events = write ? POLLOUT : POLLIN;
+    int timeoutMsec = timeout ? (timeout->tv_sec*1000 + timeout->tv_usec/1000) : -1;
+    int result = poll( &pfd, 1, timeoutMsec );
+    if( result > 0 )
+    {
+      if( !(pfd.revents & (write ? POLLOUT : POLLIN)) )
+      {
+        result = 0;
+      }
+    }
+    return result;
+#else
+    fd_set writeset;
+    fd_set readset;
+    if( write )
+    {
+      FD_ZERO( &readset );
+      writeset = m_fds;
+    } else {
+      readset = m_fds;
+      FD_ZERO( &writeset );
+    }
+    return ::select ( 1 + m_socket, &readset, &writeset, NULL, timeout );
+#endif
+}
 bool SocketConnection::processQueue()
 {
   Locker l( m_mutex );
@@ -76,8 +110,7 @@ bool SocketConnection::processQueue()
   if( !m_sendQueue.size() ) return true;
 
   struct timeval timeout = { 0, 0 };
-  fd_set writeset = m_fds;
-  if( select( 1 + m_socket, 0, &writeset, 0, &timeout ) <= 0 )
+  if( this->select( &timeout, /* write = */ true ) <= 0)
     return false;
     
   const std::string& msg = m_sendQueue.front();
@@ -128,11 +161,10 @@ bool SocketConnection::read( SocketAcceptor& a, SocketServer& s )
     if ( !m_pSession )
     {
       struct timeval timeout = { 1, 0 };
-      fd_set readset = m_fds;
 
       while( !readMessage( msg ) )
       {
-        int result = select( 1 + m_socket, &readset, 0, 0, &timeout );
+        int result = this->select( &timeout, /* write = */ false );
         if( result > 0 )
           readFromSocket();
         else if( result == 0 )

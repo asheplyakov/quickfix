@@ -79,6 +79,7 @@ private:
   typedef std::deque<std::string, ALLOCATOR<std::string> >
     Queue;
 
+  int select( timeval* timeout, bool write );
   bool isValidSession();
   void readFromSocket() EXCEPT ( SocketRecvFailed );
   bool readMessage( std::string& msg );
