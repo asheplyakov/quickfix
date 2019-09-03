@@ -22,9 +22,17 @@
 #else
 #include "config.h"
 #endif
+#ifdef __linux__
+#define USE_EPOLL
+#else
+#define USE_SELECT
+#endif
 
 #include "SocketMonitor.h"
 #include "Utility.h"
+#ifdef USE_EPOLL
+#include <sys/epoll.h>
+#endif
 #include <exception>
 #include <set>
 #include <algorithm>
@@ -37,12 +45,20 @@ SocketMonitor::SocketMonitor( int timeout )
 {
   socket_init();
 
+#ifdef USE_EPOLL
+  m_epfd = epoll_create1(EPOLL_CLOEXEC);
+  if (m_epfd < 0) {
+      throw std::runtime_error("epoll_create1");
+  }
+  m_signal = m_interrupt = -1;
+#else
   std::pair<socket_handle, socket_handle> sockets = socket_createpair();
   m_signal = sockets.first;
   m_interrupt = sockets.second;
   socket_setnonblock( m_signal );
   socket_setnonblock( m_interrupt );
   m_readSockets.insert( m_interrupt );
+#endif
 
   m_timeval.tv_sec = 0;
   m_timeval.tv_usec = 0;
@@ -58,8 +74,21 @@ SocketMonitor::~SocketMonitor()
     socket_close( *i );
   }
 
+#ifdef USE_EPOLL
+  close(m_epfd);
+#else
   socket_close( m_signal );
+#endif
   socket_term();
+}
+
+size_t SocketMonitor::numSockets() const
+{
+#ifdef USE_EPOLL
+  return m_readSockets.size();
+#else
+  return m_readSockets.size() - 1;
+#endif
 }
 
 bool SocketMonitor::addConnect(socket_handle s )
@@ -68,6 +97,22 @@ bool SocketMonitor::addConnect(socket_handle s )
   Sockets::iterator i = m_connectSockets.find( s );
   if( i != m_connectSockets.end() ) return false;
 
+#ifdef USE_EPOLL
+  epoll_event event;
+  event.events = EPOLLOUT;
+  event.data.fd = s;
+  int op = EPOLL_CTL_ADD;
+  if (m_writeSockets.find(s) != m_writeSockets.end()) {
+      op = EPOLL_CTL_MOD;
+  }
+  if (m_readSockets.find(s) != m_readSockets.end()) {
+      op = EPOLL_CTL_MOD;
+      event.events |= EPOLLIN;
+  }
+  if (epoll_ctl(m_epfd, op, s, &event) < 0) {
+      throw std::runtime_error("SocketMonitor::addConnect: epoll_ctl");
+  }
+#endif
   m_connectSockets.insert( s );
   return true;
 }
@@ -78,6 +123,14 @@ bool SocketMonitor::addRead(socket_handle s )
   Sockets::iterator i = m_readSockets.find( s );
   if( i != m_readSockets.end() ) return false;
 
+#ifdef USE_EPOLL
+  epoll_event event;
+  event.events = EPOLLIN;
+  event.data.fd = s;
+  if (epoll_ctl(m_epfd, EPOLL_CTL_ADD, s, &event) < 0) {
+      throw std::runtime_error("SocketMonitor::addRead: epoll_ctl");
+  }
+#endif
   m_readSockets.insert( s );
   return true;
 }
@@ -91,6 +144,13 @@ bool SocketMonitor::addWrite(socket_handle s )
   Sockets::iterator i = m_writeSockets.find( s );
   if( i != m_writeSockets.end() ) return false;
 
+#ifdef USE_EPOLL
+  epoll_event event;
+  event.events = EPOLLIN|EPOLLOUT;
+  if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, s, &event) < 0) {
+      throw std::runtime_error("SocketMonitor::addWrite: epoll_ctl");
+  }
+#endif
   m_writeSockets.insert( s );
   return true;
 }
@@ -100,6 +160,9 @@ bool SocketMonitor::drop(socket_handle s )
   Sockets::iterator i = m_readSockets.find( s );
   Sockets::iterator j = m_writeSockets.find( s );
   Sockets::iterator k = m_connectSockets.find( s );
+#ifdef USE_EPOLL
+  epoll_ctl(m_epfd, EPOLL_CTL_DEL, s, NULL);
+#endif
 
   if ( i != m_readSockets.end() || 
        j != m_writeSockets.end() ||
@@ -167,7 +230,11 @@ bool SocketMonitor::sleepIfEmpty( bool poll )
 
 void SocketMonitor::signal(socket_handle socket )
 {
+#ifdef USE_EPOLL
+  addWrite(socket);
+#else
   socket_send( m_signal, (char*)&socket, sizeof(socket) );
+#endif
 }
 
 void SocketMonitor::unsignal(socket_handle s )
@@ -175,7 +242,66 @@ void SocketMonitor::unsignal(socket_handle s )
   Sockets::iterator i = m_writeSockets.find( s );
   if( i == m_writeSockets.end() ) return;
 
+#ifdef USE_EPOLL
+  epoll_event ev;
+  memset(&ev, 0, sizeof(ev));
+  ev.data.fd = s;
+  if (m_connectSockets.find(s) != m_connectSockets.end()) {
+      ev.events |= EPOLLIN;
+  }
+  if (m_readSockets.find(s) != m_readSockets.end()) {
+      ev.events |= EPOLLIN;
+  }
+  if (ev.events) {
+      if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, s, &ev) < 0) {
+        throw std::runtime_error("SocketMonitor::unsignal: EPOLL_CTL_MOD");
+      }
+  } else {
+     // XXX: should I bail out on failure?
+     epoll_ctl(m_epfd, EPOLL_CTL_DEL, s, NULL);
+  }
+#endif
   m_writeSockets.erase( s );
+}
+
+int SocketMonitor::select(fd_set *readSet, fd_set *writeSet, fd_set *exceptSet, timeval *timeout)
+{
+#ifdef USE_EPOLL
+  int result = 0;
+  epoll_event events[FD_SETSIZE];
+  int timeoutMsec = timeout ? (1000*timeout->tv_sec + timeout->tv_usec/1000) : -1;
+  do {
+      result = epoll_wait(m_epfd, events, sizeof(events)/sizeof(events[0]), timeoutMsec);
+      if (result < 0) {
+          if (errno == EINTR) {
+              continue;
+          } else {
+              // TODO: log the error
+          }
+      }
+  } while (result < 0);
+  if (result > 0) {
+      for (int i = 0; i < result; i++) {
+          if (events[i].events & EPOLLERR) {
+              FD_SET(events[i].data.fd, exceptSet);
+          }
+          if (events[i].events & EPOLLOUT) {
+              FD_SET(events[i].data.fd, writeSet);
+          }
+          if (events[i].events & EPOLLIN) {
+              FD_SET(events[i].data.fd, readSet);
+          }
+      }
+  }
+  return result;
+#else
+  buildSet(m_readSockets, *readSet);
+  buildSet(m_connectSockets, *writeSet);
+  buildSet(m_writeSockets, *writeSet);
+  buildSet(m_connectSockets, *exceptSet);
+  int result = ::select(FD_SETSIZE, readSet, writeSet, exceptSet, timeout);
+  return result;
+#endif
 }
 
 void SocketMonitor::block( Strategy& strategy, bool poll, double timeout )
@@ -190,14 +316,10 @@ void SocketMonitor::block( Strategy& strategy, bool poll, double timeout )
 
   fd_set readSet;
   FD_ZERO( &readSet );
-  buildSet( m_readSockets, readSet );
   fd_set writeSet;
   FD_ZERO( &writeSet );
-  buildSet( m_connectSockets, writeSet );
-  buildSet( m_writeSockets, writeSet );
   fd_set exceptSet;
   FD_ZERO( &exceptSet );
-  buildSet( m_connectSockets, exceptSet );
 
   if ( sleepIfEmpty(poll) )
   {
@@ -205,8 +327,7 @@ void SocketMonitor::block( Strategy& strategy, bool poll, double timeout )
     return;
   }
 
-  int result = select( FD_SETSIZE, &readSet, &writeSet, &exceptSet, getTimeval(poll, timeout) );
-
+  int result = this->select(&readSet, &writeSet, &exceptSet, getTimeval(poll, timeout));
   if ( result == 0 )
   {
     strategy.onTimeout( *this );
@@ -251,9 +372,11 @@ void SocketMonitor::processReadSet( Strategy& strategy, fd_set& readSet )
         continue;
       if( s == m_interrupt )
       {
+#ifndef USE_EPOLL
         socket_handle socket = 0;
         socket_recv( s, (char*)&socket, sizeof(socket) );
         addWrite( socket );
+#endif
       }
       else
       {
@@ -290,6 +413,17 @@ void SocketMonitor::processWriteSet( Strategy& strategy, fd_set& writeSet )
       continue;
     m_connectSockets.erase( s );
     m_readSockets.insert( s );
+#ifdef USE_EPOLL
+    epoll_event event;
+    event.data.fd = s;
+    event.events = EPOLLIN;
+    if (m_writeSockets.find(s) != m_writeSockets.end()) {
+        event.events |= EPOLLOUT;
+    }
+    if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, s, &event) < 0) {
+        throw std::runtime_error("SocketMonitor::processWriteSet: epoll_ctl");
+    }
+#endif
     strategy.onConnect( *this, s );
   }
 

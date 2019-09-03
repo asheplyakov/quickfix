@@ -58,7 +58,7 @@ SUITE(SocketMonitorTests)
 TEST(addWrite_ReadSocketDoesNotExist_False)
 {
   SocketMonitor monitor;
-  int socket = 101;
+  int socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   CHECK(!monitor.addWrite(socket));
 
   socket_close(socket);
@@ -67,7 +67,7 @@ TEST(addWrite_ReadSocketDoesNotExist_False)
 TEST(addWrite_WriteSocketAlreadyExists_False)
 {
   SocketMonitor monitor;
-  int socket = 101;
+  int socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   monitor.addRead(socket);
   monitor.addWrite(socket);
 
@@ -81,7 +81,7 @@ TEST(Unsignal_SocketExists_WriteSocketErased)
   SocketMonitor monitor;
   TestStrategy strategy;
 
-  int socket = 101;
+  int socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   monitor.addRead(socket);
   monitor.addWrite(socket);
   monitor.addConnect(socket);
@@ -97,7 +97,7 @@ TEST(Unsignal_SocketDoesNotExist_WriteSocketErased)
   SocketMonitor monitor;
   TestStrategy strategy;
 
-  int socket = 101;
+  int socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   monitor.addRead(socket);
   monitor.addConnect(socket);
 

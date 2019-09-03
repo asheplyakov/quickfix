@@ -62,8 +62,7 @@ public:
   void unsignal(socket_handle socket );
   void block( Strategy& strategy, bool poll = 0, double timeout = 0.0 );
 
-  size_t numSockets() 
-  { return m_readSockets.size() - 1; }
+  size_t numSockets() const;
 
 private:
   typedef std::set < socket_handle > Sockets;
@@ -79,7 +78,11 @@ private:
   void processReadSet( Strategy&, fd_set& );
   void processWriteSet( Strategy&, fd_set& );
   void processExceptSet( Strategy&, fd_set& );
+  int select(fd_set *readSet, fd_set *writeSet, fd_set *exceptSet, timeval *timeout);
 
+#ifdef __linux__
+  int m_epfd;
+#endif
   int m_timeout;
   timeval m_timeval;
 #ifndef SELECT_DECREMENTS_TIME
